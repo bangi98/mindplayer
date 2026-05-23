@@ -1,100 +1,105 @@
-"""
-Flask integration.
+"""Flask integration: the `@traced` decorator.
+
+Decorate any view function to record a tracesnap trace just for that
+endpoint. Reads recording config from `current_app.config["TRACESNAP"]`;
+recording is gated on the `TRACESNAP_ENABLED=1` environment variable, so
+the decorator is a no-op otherwise.
 
     from flask import Flask
-    from tracesnap.integrations.flask import TraceSnap
+    from tracesnap.integrations.flask import traced
 
     app = Flask(__name__)
-    TraceSnap(app, output_dir="traces")
+    app.config["TRACESNAP"] = {
+        "output_dir": "traces",
+        "source_files": [__file__],
+    }
 
-Every request gets recorded; the trace lands in `traces/<endpoint>-<seq>.json`.
-The hooks are named with the `_recorder_` prefix so the recorder skips
-them (they never appear in the trace itself).
+    @app.route("/checkout")
+    @traced
+    def checkout():
+        ...
 """
-import os
-import time
-from pathlib import Path
+from __future__ import annotations
+
+import functools
 
 try:
-    from flask import g, request
+    from flask import current_app, request
 except ImportError as exc:  # pragma: no cover
     raise ImportError("Flask is not installed. Try: pip install tracesnap[flask]") from exc
 
-from .._recorder import start_recording, stop_recording
-from ..api import write_trace
+from ._common import (
+    begin_recording,
+    end_recording,
+    env_enabled,
+    normalize_config,
+    status_from_exception,
+    status_from_response,
+)
 
 
-class TraceSnap:
-    def __init__(self, app=None, *, output_dir="traces", trace_id_prefix="req",
-                 enabled=None, source_files=None, redact_names=None):
-        self.output_dir = Path(output_dir)
-        self.trace_id_prefix = trace_id_prefix
-        self.enabled = enabled or (lambda req: True)
-        self.source_files = source_files
-        self.redact_names = redact_names
-        if app is not None:
-            self.init_app(app)
+def traced(func=None, *, name: str | None = None):
+    """Record a trace for the decorated Flask view. Usage:
 
-    def init_app(self, app):
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        app.before_request(self._recorder_begin)
-        app.after_request(self._recorder_capture_status)
-        app.teardown_request(self._recorder_end)
-        app.extensions = getattr(app, "extensions", {})
-        app.extensions["tracesnap"] = self
+        @traced
+        def view(): ...
 
-        # If source_files wasn't given, default to the app's module file.
-        if self.source_files is None:
-            mod_file = getattr(app, "root_path", None)
-            if mod_file:
-                main_mod = os.path.join(mod_file, "__init__.py")
-                if os.path.exists(main_mod):
-                    self.source_files = [main_mod]
+        @traced(name="checkout")
+        def view(): ...
 
-    def _resolve_source_files(self):
-        if self.source_files:
-            return list(self.source_files)
-        # Fallback: the file that imported flask.request.endpoint's view function.
-        try:
-            from flask import current_app
-            view_func = current_app.view_functions.get(request.endpoint)
-            if view_func and view_func.__code__:
-                return [view_func.__code__.co_filename]
-        except Exception:
-            pass
-        return []
+    Stack `@traced` *below* the route decorator:
 
-    def _recorder_begin(self):
-        if not self.enabled(request):
-            g._tracesnap_skip = True
-            return
-        g._tracesnap_skip = False
-        g._tracesnap_t0 = time.perf_counter()
-        source_files = self._resolve_source_files()
-        if not source_files:
-            g._tracesnap_skip = True
-            return
-        trace_id = f"{self.trace_id_prefix}-{int(time.time() * 1000)}"
-        g._tracesnap_trace_id = trace_id
-        start_recording(trace_id=trace_id, kind="request",
-                        source_files=source_files, redact_names=self.redact_names)
+        @app.route("/checkout")
+        @traced
+        def checkout(): ...
+    """
 
-    def _recorder_capture_status(self, resp):
-        g._tracesnap_status = resp.status_code
-        return resp
+    def decorate(f):
+        @functools.wraps(f)
+        def wrapper(*args, **kwargs):
+            if not env_enabled():
+                return f(*args, **kwargs)
 
-    def _recorder_end(self, exc):
-        if getattr(g, "_tracesnap_skip", True):
-            return
-        duration_ms = round(
-            (time.perf_counter() - getattr(g, "_tracesnap_t0", time.perf_counter())) * 1000.0, 2)
-        status = getattr(g, "_tracesnap_status", 500 if exc else 200)
-        try:
-            trace = stop_recording(
-                entry=f"{request.endpoint or '<unknown>'}",
-                request={"method": request.method, "path": request.path,
-                         "status": status, "duration_ms": duration_ms})
-        except RuntimeError:
-            return
-        out = self.output_dir / f"{g._tracesnap_trace_id}.json"
-        write_trace(trace, out)
+            try:
+                cfg = current_app.config.get("TRACESNAP")
+            except RuntimeError:
+                # outside application context — skip
+                return f(*args, **kwargs)
+
+            output_dir, source_files, redact_names, prefix = normalize_config(cfg)
+            if not source_files:
+                return f(*args, **kwargs)
+
+            trace_name = name or f.__name__
+            trace_id, t0 = begin_recording(
+                trace_name=trace_name,
+                source_files=source_files,
+                redact_names=redact_names,
+                trace_id_prefix=prefix,
+            )
+            status_code = 500
+            try:
+                response = f(*args, **kwargs)
+                status_code = status_from_response(response)
+                return response
+            except Exception as exc:
+                status_code = status_from_exception(exc, status_code)
+                raise
+            finally:
+                end_recording(
+                    trace_id=trace_id,
+                    t0=t0,
+                    output_dir=output_dir,
+                    entry=f.__qualname__,
+                    request_info={
+                        "method": request.method,
+                        "path": request.path,
+                        "status": status_code,
+                    },
+                )
+
+        return wrapper
+
+    if func is None:
+        return decorate
+    return decorate(func)

@@ -2,12 +2,16 @@
 Single-file Django example. Run with:
 
     pip install -e .[django]
-    python examples/django_app.py runserver 5052
+    TRACESNAP_ENABLED=1 python examples/django_app.py runserver 5052
 
 Hit:
     curl http://127.0.0.1:5052/checkout
 
-Traces land in ./traces/<id>.json.
+Traces land in ./traces/<id>.json. Open one with:
+    tracesnap view traces/<id>.json
+
+Recording is opt-in per view via @traced. Without TRACESNAP_ENABLED=1
+the decorator is a no-op.
 """
 import os
 import sys
@@ -26,9 +30,7 @@ settings.configure(
     SECRET_KEY="example-key-not-for-prod",
     ROOT_URLCONF=__name__,
     ALLOWED_HOSTS=["*"],
-    MIDDLEWARE=[
-        "tracesnap.integrations.django.RecorderMiddleware",
-    ],
+    MIDDLEWARE=[],
     TRACESNAP={
         "output_dir": "traces",
         "source_files": [HERE],
@@ -36,6 +38,9 @@ settings.configure(
     INSTALLED_APPS=[],
 )
 django.setup()
+
+
+from tracesnap.integrations.django import traced  # noqa: E402  (after django.setup)
 
 
 def validate_cart(items):
@@ -56,6 +61,7 @@ def compute_total(items, coupon_pct):
     return subtotal
 
 
+@traced
 def checkout(request):
     import requests
     raw = [100, 50, 25]

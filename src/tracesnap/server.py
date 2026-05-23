@@ -15,6 +15,7 @@ Routes:
 - `POST   /api/run/request`         -> `{method, url, headers, body}` proxies
                                        to the target app, returns its response
 """
+import errno
 import http.server
 import json
 import os
@@ -31,6 +32,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+
+DEFAULT_PORT = 8765
 
 try:
     from importlib.resources import files as _resource_files
@@ -61,13 +64,16 @@ def _stage_player_files(dst):
 
 
 def serve(trace_path=None, target_id=None, view=None,
-          port=0, open_browser=True, scan_root=None):
+          port=DEFAULT_PORT, open_browser=True, scan_root=None):
     """Spin up the local server.
 
     - `trace_path` (optional): stage this file into the tmpdir and open
       `<view>.html?trace=<file>`.
     - `target_id` (optional): library record id. If set, the URL will be
       `<view>.html?id=<id>` so the player loads it via the API.
+    - `port`: TCP port to bind. Defaults to `DEFAULT_PORT` (8765). Pass `0`
+      to let the OS pick a random free port. If a non-zero port is taken,
+      we fall back to a random free port with a printed notice.
     - `scan_root`: dir the Script tab on the New-record page walks for
       `.py` files. Defaults to the current working directory.
     """
@@ -108,7 +114,16 @@ def serve(trace_path=None, target_id=None, view=None,
         query = f"?trace={trace_path.name}"
 
     handler = _make_handler(str(tmpdir), scan_root=scan_root)
-    with socketserver.ThreadingTCPServer(("127.0.0.1", port), handler) as httpd:
+    try:
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), handler)
+    except OSError as e:
+        if port != 0 and e.errno in (errno.EADDRINUSE, errno.EACCES):
+            print(f"tracesnap: port {port} unavailable ({e.strerror or e}); "
+                  "falling back to a random free port", file=sys.stderr)
+            httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler)
+        else:
+            raise
+    with httpd:
         actual_port = httpd.server_address[1]
         url = f"http://127.0.0.1:{actual_port}/{html_name}{query}"
         print("tracesnap: serving the player library", file=sys.stderr)

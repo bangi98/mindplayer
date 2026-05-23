@@ -10,7 +10,7 @@ from pathlib import Path
 from . import __version__, library
 from ._recorder import start_recording, stop_recording
 from .api import write_trace
-from .server import serve
+from .server import DEFAULT_PORT, serve
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +269,9 @@ def build_parser():
                    default=None,
                    help="Which page to open first. Default: 'home' when browsing the "
                         "library, 'call_graph' when a specific trace is given.")
-    v.add_argument("--port", type=int, default=0,
-                   help="Port for the local server (default: random free port).")
+    v.add_argument("--port", type=int, default=DEFAULT_PORT,
+                   help=f"Port for the local server (default: {DEFAULT_PORT}; "
+                        "falls back to a random free port if taken; pass 0 to always randomize).")
     v.add_argument("--no-browser", action="store_true",
                    help="Don't auto-open the default browser.")
     v.add_argument("--scan-root", default=None,

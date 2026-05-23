@@ -1,9 +1,9 @@
 """
-FastAPI example using the tracesnap middleware.
+FastAPI example using the tracesnap @traced decorator.
 
 Run:
     pip install -e .[fastapi]
-    uvicorn examples.fastapi_app:app --port 5051
+    TRACESNAP_ENABLED=1 uvicorn examples.fastapi_app:app --port 5051
 
 Hit:
     curl http://127.0.0.1:5051/checkout
@@ -13,14 +13,14 @@ Traces land in ./traces/<id>.json.
 import os
 
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
-from tracesnap.integrations.fastapi import install
+from tracesnap.integrations.fastapi import configure, traced
 
 
 HERE = os.path.abspath(__file__)
 app = FastAPI()
-install(app, output_dir="traces", source_files=[HERE])
+configure(output_dir="traces", source_files=[HERE])
 
 
 def validate_cart(items):
@@ -42,7 +42,8 @@ def compute_total(items, coupon_pct):
 
 
 @app.get("/checkout")
-def checkout():
+@traced
+def checkout(request: Request):
     raw = [100, 50, 25]
     cart = validate_cart(raw)
     r = requests.get("https://httpbin.org/get", params={"q": "trace-demo"}, timeout=10)

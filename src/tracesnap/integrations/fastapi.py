@@ -1,70 +1,185 @@
-"""
-FastAPI integration.
+"""FastAPI / Starlette integration: the `@traced` decorator.
+
+Decorate any path operation (sync or async) to record a tracesnap trace
+just for that endpoint. FastAPI has no central settings object, so call
+`configure(...)` once at startup to set the recording config. Recording
+is gated on the `TRACESNAP_ENABLED=1` environment variable, so the
+decorator is a no-op otherwise.
 
     from fastapi import FastAPI
-    from tracesnap.integrations.fastapi import install
+    from tracesnap.integrations.fastapi import configure, traced
 
     app = FastAPI()
-    install(app, output_dir="traces", source_files=[__file__])
+    configure(output_dir="traces", source_files=[__file__])
 
-Note: settrace is per-thread; contextvars are per-asyncio-task. For
-single-handler-per-request flow (the common case) this works correctly.
-Concurrent `asyncio.gather(...)` of multiple traced sub-tasks within a
-single request boundary will all share the same recording session —
-this is documented behaviour for v0.1. If your handler spawns parallel
-tasks that you want individually traced, instrument inside each task
-with `tracesnap.record(...)` instead.
+    @app.get("/checkout")
+    @traced
+    async def checkout():
+        ...
+
+Stack `@traced` *below* the route decorator (closer to the function) so
+FastAPI's dependency-injection sees the wrapped signature.
+
+To get request method/path in the trace, declare a `request: Request`
+parameter on the view (FastAPI only injects it if asked). Without it the
+trace is still produced; method/path just show as "?".
+
+Note: `sys.settrace` is per-thread; contextvars are per-asyncio-task.
+Single-handler-per-request is the supported case. Concurrent
+`asyncio.gather(...)` of multiple sub-tasks within a traced handler
+share the same recording session.
 """
-import time
-from pathlib import Path
+from __future__ import annotations
+
+import functools
+import inspect
+from typing import Any
 
 try:
-    from fastapi import Request
-    from starlette.middleware.base import BaseHTTPMiddleware
+    from fastapi import Request  # noqa: F401  — type imported for clarity
 except ImportError as exc:  # pragma: no cover
     raise ImportError("FastAPI is not installed. Try: pip install tracesnap[fastapi]") from exc
 
-from .._recorder import start_recording, stop_recording
-from ..api import write_trace
+from ._common import (
+    begin_recording,
+    end_recording,
+    env_enabled,
+    normalize_config,
+    status_from_exception,
+    status_from_response,
+)
+
+_config: dict[str, Any] = {}
 
 
-class TraceSnapMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, output_dir="traces", source_files=None,
-                 trace_id_prefix="req", redact_names=None, enabled=None):
-        super().__init__(app)
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.source_files = source_files or []
-        self.trace_id_prefix = trace_id_prefix
-        self.redact_names = redact_names
-        self.enabled = enabled or (lambda r: True)
+def configure(
+    *,
+    output_dir: str = "traces",
+    source_files: list[str] | None = None,
+    redact_names: Any = None,
+    trace_id_prefix: str | None = None,
+) -> None:
+    """Set the tracesnap recording config for this FastAPI app.
 
-    async def dispatch(self, request: "Request", call_next):
-        if not self.source_files or not self.enabled(request):
-            return await call_next(request)
+    Call once at startup, before requests start arriving. Replaces any
+    previous configuration.
+    """
+    _config.clear()
+    _config.update(
+        {
+            "output_dir": output_dir,
+            "source_files": list(source_files or []),
+            "redact_names": redact_names,
+            "trace_id_prefix": trace_id_prefix,
+        }
+    )
 
-        trace_id = f"{self.trace_id_prefix}-{int(time.time() * 1000)}"
-        t0 = time.perf_counter()
-        start_recording(trace_id=trace_id, kind="request",
-                        source_files=self.source_files, redact_names=self.redact_names)
-        status = 500
-        try:
-            response = await call_next(request)
-            status = response.status_code
-            return response
-        finally:
-            duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+def _find_request(args, kwargs):
+    """Find a Starlette/FastAPI Request in the call args, if any."""
+    for a in list(args) + list(kwargs.values()):
+        if hasattr(a, "method") and hasattr(a, "url") and hasattr(a, "headers"):
+            return a
+    return None
+
+
+def _request_info(request, status_code):
+    if request is None:
+        return {"method": "?", "path": "?", "status": status_code}
+    return {
+        "method": request.method,
+        "path": str(getattr(request, "url", "?").path) if hasattr(request, "url") else "?",
+        "status": status_code,
+    }
+
+
+def traced(func=None, *, name: str | None = None):
+    """Record a trace for the decorated path operation. Usage:
+
+        @traced
+        async def view(): ...
+
+        @traced(name="checkout")
+        def view(): ...
+    """
+
+    def decorate(f):
+        is_async = inspect.iscoroutinefunction(f)
+
+        if is_async:
+
+            @functools.wraps(f)
+            async def async_wrapper(*args, **kwargs):
+                if not env_enabled():
+                    return await f(*args, **kwargs)
+
+                output_dir, source_files, redact_names, prefix = normalize_config(_config)
+                if not source_files:
+                    return await f(*args, **kwargs)
+
+                request = _find_request(args, kwargs)
+                trace_name = name or f.__name__
+                trace_id, t0 = begin_recording(
+                    trace_name=trace_name,
+                    source_files=source_files,
+                    redact_names=redact_names,
+                    trace_id_prefix=prefix,
+                )
+                status_code = 500
+                try:
+                    response = await f(*args, **kwargs)
+                    status_code = status_from_response(response)
+                    return response
+                except Exception as exc:
+                    status_code = status_from_exception(exc, status_code)
+                    raise
+                finally:
+                    end_recording(
+                        trace_id=trace_id,
+                        t0=t0,
+                        output_dir=output_dir,
+                        entry=f.__qualname__,
+                        request_info=_request_info(request, status_code),
+                    )
+
+            return async_wrapper
+
+        @functools.wraps(f)
+        def sync_wrapper(*args, **kwargs):
+            if not env_enabled():
+                return f(*args, **kwargs)
+
+            output_dir, source_files, redact_names, prefix = normalize_config(_config)
+            if not source_files:
+                return f(*args, **kwargs)
+
+            request = _find_request(args, kwargs)
+            trace_name = name or f.__name__
+            trace_id, t0 = begin_recording(
+                trace_name=trace_name,
+                source_files=source_files,
+                redact_names=redact_names,
+                trace_id_prefix=prefix,
+            )
+            status_code = 500
             try:
-                trace = stop_recording(
-                    entry=str(request.url.path),
-                    request={"method": request.method, "path": str(request.url.path),
-                             "status": status, "duration_ms": duration_ms})
-                write_trace(trace, self.output_dir / f"{trace_id}.json")
-            except RuntimeError:
-                pass
+                response = f(*args, **kwargs)
+                status_code = status_from_response(response)
+                return response
+            except Exception as exc:
+                status_code = status_from_exception(exc, status_code)
+                raise
+            finally:
+                end_recording(
+                    trace_id=trace_id,
+                    t0=t0,
+                    output_dir=output_dir,
+                    entry=f.__qualname__,
+                    request_info=_request_info(request, status_code),
+                )
 
+        return sync_wrapper
 
-def install(app, **kwargs):
-    """Attach TraceSnapMiddleware to a FastAPI app."""
-    app.add_middleware(TraceSnapMiddleware, **kwargs)
-    return app
+    if func is None:
+        return decorate
+    return decorate(func)

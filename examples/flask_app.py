@@ -1,30 +1,31 @@
 """
-Flask example using the tracesnap integration.
+Flask example using the tracesnap @traced decorator.
 
 Run:
     pip install -e .[flask]
-    python examples/flask_app.py
+    TRACESNAP_ENABLED=1 python examples/flask_app.py
 
 Then hit:
     curl http://127.0.0.1:5050/checkout
 
-Each request writes a trace into ./traces/<id>.json. Open one with:
+Each request to a decorated view writes a trace into ./traces/<id>.json.
+Open one with:
     tracesnap view traces/<id>.json
 """
 import os
-import time
 
 from flask import Flask, jsonify
 import requests
 
-from tracesnap.integrations.flask import TraceSnap
+from tracesnap.integrations.flask import traced
 
 
 HERE = os.path.abspath(__file__)
 app = Flask(__name__)
-
-# One line: every request is recorded into ./traces/
-TraceSnap(app, output_dir="traces", source_files=[HERE])
+app.config["TRACESNAP"] = {
+    "output_dir": "traces",
+    "source_files": [HERE],
+}
 
 
 def validate_cart(items):
@@ -46,6 +47,7 @@ def compute_total(items, coupon_pct):
 
 
 @app.route("/checkout", methods=["GET"])
+@traced
 def checkout():
     raw = [100, 50, 25]
     cart = validate_cart(raw)

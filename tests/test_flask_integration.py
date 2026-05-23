@@ -1,4 +1,5 @@
-"""Smoke test for the Flask integration. Skipped if Flask isn't installed."""
+"""Smoke test for the Flask @traced decorator. Skipped if Flask isn't installed."""
+import json
 import os
 from pathlib import Path
 
@@ -7,18 +8,21 @@ import pytest
 flask = pytest.importorskip("flask")
 
 
-def test_flask_records_one_trace_per_request(tmp_path):
-    from flask import Flask
-    from tracesnap.integrations.flask import TraceSnap
-
-    APP_PY = tmp_path / "app_under_test.py"
-    APP_PY.write_text("""
+def _build_app(tmp_path: Path):
+    """Write a Flask app to a tmp file and import it, so @traced has a
+    real source file in the recording scope."""
+    app_py = tmp_path / "app_under_test.py"
+    app_py.write_text(
+        """
 import os
-from flask import Flask
-from tracesnap.integrations.flask import TraceSnap
+from flask import Flask, jsonify
+from tracesnap.integrations.flask import traced
 
 app = Flask(__name__)
-TraceSnap(app, output_dir=os.environ['TRACE_DIR'], source_files=[__file__])
+app.config['TRACESNAP'] = {
+    'output_dir': os.environ['TRACE_DIR'],
+    'source_files': [__file__],
+}
 
 def helper(items):
     total = 0
@@ -27,15 +31,29 @@ def helper(items):
     return total
 
 @app.route('/sum')
+@traced
 def sum_endpoint():
-    return {'total': helper([1, 2, 3])}
-""")
+    return jsonify({'total': helper([1, 2, 3])})
+
+@app.route('/silent')
+def silent_endpoint():
+    # NOT decorated — must not produce a trace.
+    return jsonify({'ok': True})
+"""
+    )
     import importlib.util
-    out_dir = tmp_path / "traces"
-    os.environ["TRACE_DIR"] = str(out_dir)
-    spec = importlib.util.spec_from_file_location("app_under_test", str(APP_PY))
+
+    spec = importlib.util.spec_from_file_location("app_under_test", str(app_py))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    return mod
+
+
+def test_traced_endpoint_records_a_trace(tmp_path, monkeypatch):
+    out_dir = tmp_path / "traces"
+    monkeypatch.setenv("TRACE_DIR", str(out_dir))
+    monkeypatch.setenv("TRACESNAP_ENABLED", "1")
+    mod = _build_app(tmp_path)
 
     client = mod.app.test_client()
     resp = client.get("/sum")
@@ -44,10 +62,37 @@ def sum_endpoint():
 
     files = list(out_dir.glob("*.json"))
     assert len(files) == 1
-    import json
     trace = json.loads(files[0].read_text())
     assert trace["session"]["kind"] == "request"
     assert trace["session"]["request"]["status"] == 200
+    assert trace["session"]["request"]["method"] == "GET"
+    assert trace["session"]["request"]["path"] == "/sum"
     funcs = {e.get("func") for e in trace["events"] if e["type"] == "call"}
     assert "sum_endpoint" in funcs
     assert "helper" in funcs
+
+
+def test_undecorated_endpoint_produces_no_trace(tmp_path, monkeypatch):
+    out_dir = tmp_path / "traces"
+    monkeypatch.setenv("TRACE_DIR", str(out_dir))
+    monkeypatch.setenv("TRACESNAP_ENABLED", "1")
+    mod = _build_app(tmp_path)
+
+    client = mod.app.test_client()
+    resp = client.get("/silent")
+    assert resp.status_code == 200
+
+    assert not out_dir.exists() or list(out_dir.glob("*.json")) == []
+
+
+def test_decorator_is_noop_without_env_var(tmp_path, monkeypatch):
+    out_dir = tmp_path / "traces"
+    monkeypatch.setenv("TRACE_DIR", str(out_dir))
+    monkeypatch.delenv("TRACESNAP_ENABLED", raising=False)
+    mod = _build_app(tmp_path)
+
+    client = mod.app.test_client()
+    resp = client.get("/sum")
+    assert resp.status_code == 200
+
+    assert not out_dir.exists() or list(out_dir.glob("*.json")) == []
