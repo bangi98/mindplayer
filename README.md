@@ -93,6 +93,31 @@ finally:
     tracesnap.write_trace(trace, "trace.json")
 ```
 
+## Projects
+
+The library lives in one place (`~/.tracesnap/` by default), shared across
+every project on your machine — but each record is tagged with a **project**
+so they don't all blur together. The project name comes from a
+`.tracesnap.toml` at your project root, defaulting to the folder name:
+
+```bash
+tracesnap init                  # writes .tracesnap.toml (project = "<folder>")
+tracesnap init --name shop-api  # …or name it yourself
+tracesnap project               # print the current project
+tracesnap project shop-api      # rename it later
+```
+
+```toml
+# .tracesnap.toml
+project = "shop-api"
+```
+
+`tracesnap view` opens the home page already filtered to the current project
+(the directory you ran it from); a dropdown switches to any other project or to
+**All projects**. From the CLI, `tracesnap list --project shop-api` and
+`tracesnap record … --project shop-api` scope the same way. Records created
+before this feature show up under **All projects** (project "unknown").
+
 ## Framework integrations
 
 All three frameworks expose the same `@traced` decorator. Decorate only
@@ -186,14 +211,17 @@ recommended for production. Document/test your specific use.
 ```
 tracesnap record  PATH [--out FILE] [--id NAME] [--name NAME]
                        [--redact NAMES] [--no-library] [--kind KIND]
-                       [--structure-out FILE]
+                       [--structure-out FILE] [--project NAME]
 
 tracesnap view    [PATH] [--view text|simulator|graph|events|home|record]
                          [--port PORT] [--no-browser] [--scan-root DIR]
 
-tracesnap list                    # show the library
+tracesnap list                    # show the library  [--project NAME]
 tracesnap rename  ID NEW_NAME
 tracesnap delete  ID [-f]
+
+tracesnap init                    # name this project ([--name NAME])
+tracesnap project [NAME]          # show or set the current project
 
 tracesnap --version
 ```
@@ -212,6 +240,8 @@ modules it imports, and saves the trace to the on-disk library (under
   top of the built-in set (`password`, `token`, `secret`,
   `authorization`, `api_key`).
 - `--no-library` — skip saving to the library.
+- `--project NAME` — file this record under a project (default: from
+  `.tracesnap.toml`, else the current folder name). See [Projects](#projects).
 
 ### `view`
 

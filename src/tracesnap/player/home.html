@@ -284,6 +284,9 @@ main{
     <div class="record-toolbar">
       <input class="search-input" id="record-search" type="search"
              placeholder="Filter by name, id, source path…" autocomplete="off">
+      <select class="sort-select" id="record-project" title="Show records from one project">
+        <option value="__all__">All projects</option>
+      </select>
       <select class="sort-select" id="record-sort">
         <option value="newest">Newest first</option>
         <option value="oldest">Oldest first</option>
@@ -334,7 +337,43 @@ const recordsContainer = document.getElementById('records-container');
 const recordCount = document.getElementById('record-count');
 const searchInput = document.getElementById('record-search');
 const sortSelect = document.getElementById('record-sort');
+const projectSelect = document.getElementById('record-project');
 let _records = [];
+let _currentProject = '';      // project of the dir `tracesnap view` ran in
+let _selectedProject = null;   // dropdown selection; null until first load
+
+function matchesProject(r){
+  if(_selectedProject === null || _selectedProject === '__all__') return true;
+  return (r.project || '') === _selectedProject;
+}
+
+async function loadProjects(){
+  let data;
+  try{ data = await (await fetch('/api/projects')).json(); }
+  catch(e){ return; }   // dropdown just stays "All projects"
+  _currentProject = data.current || '';
+  const counts = {};
+  (data.projects || []).forEach(p => { counts[p.name] = p.count; });
+  // Always offer the current project, even before it has any records.
+  if(_currentProject && !(_currentProject in counts)) counts[_currentProject] = 0;
+  // First load: default the view to the current project so you only see
+  // this project's traces (the whole point of the dropdown).
+  if(_selectedProject === null){
+    _selectedProject = _currentProject ? _currentProject : '__all__';
+  }
+  const total = data.total != null
+    ? data.total
+    : Object.values(counts).reduce((a, b) => a + b, 0);
+  const names = Object.keys(counts).sort((a, b) => a.localeCompare(b));
+  let opts = `<option value="__all__">All projects (${total})</option>`;
+  opts += names.map(n => {
+    const label = n === '' ? '(unknown)' : n;
+    const cur = n === _currentProject ? ' — current' : '';
+    return `<option value="${esc(n)}">${esc(label)} (${counts[n]})${cur}</option>`;
+  }).join('');
+  projectSelect.innerHTML = opts;
+  projectSelect.value = _selectedProject;
+}
 
 function sortRecords(records, mode){
   const out = records.slice();
@@ -359,11 +398,12 @@ function filterRecords(records, q){
 function render(){
   const q = searchInput.value.trim();
   const mode = sortSelect.value;
-  const shown = sortRecords(filterRecords(_records, q), mode);
+  const inProject = _records.filter(matchesProject);
+  const shown = sortRecords(filterRecords(inProject, q), mode);
 
-  recordCount.textContent = _records.length === 0
+  recordCount.textContent = inProject.length === 0
     ? '0 records'
-    : (q ? `${shown.length} of ${_records.length}` : `${_records.length} record${_records.length===1?'':'s'}`);
+    : (q ? `${shown.length} of ${inProject.length}` : `${inProject.length} record${inProject.length===1?'':'s'}`);
 
   if(!_records.length){
     recordsContainer.innerHTML = `
@@ -376,6 +416,18 @@ function render(){
       </div>`;
     return;
   }
+  if(!inProject.length){
+    const pname = _selectedProject === '' ? '(unknown)' : _selectedProject;
+    recordsContainer.innerHTML = `
+      <div class="empty">
+        <div class="big">No records in <b>${esc(pname)}</b></div>
+        <div class="small">
+          Record something here, or switch the project dropdown to
+          <b>All projects</b> to see everything.
+        </div>
+      </div>`;
+    return;
+  }
   if(!shown.length){
     recordsContainer.innerHTML = `
       <div class="empty">
@@ -384,6 +436,7 @@ function render(){
     return;
   }
 
+  const showProj = _selectedProject === null || _selectedProject === '__all__';
   const html = '<div class="records-table">' + shown.map(r => {
     const kind = (r.kind || 'script').toLowerCase();
     const kindCls = kind === 'http' || kind === 'request' ? 'http' : '';
@@ -395,6 +448,7 @@ function render(){
           <div class="r-name" data-id="${esc(r.id)}" title="Click to open · double-click to rename">${esc(r.name || r.id)}</div>
           <div class="r-meta">
             <span title="${esc(r.id)}">${esc(r.id)}</span>
+            ${(showProj && r.project) ? '<span class="sep">·</span><span title="project">▸ ' + esc(r.project) + '</span>' : ''}
             ${src ? '<span class="sep">·</span><span title="' + esc(src) + '">' + esc(srcShort) + '</span>' : ''}
             <span class="sep">·</span><span title="${esc(r.created||'')}">${esc(fmtDate(r.created))}</span>
           </div>
@@ -421,6 +475,7 @@ async function load(){
     recordsContainer.innerHTML = `<div class="empty"><div class="small">Failed to load records: ${esc(e.message)}</div></div>`;
     return;
   }
+  await loadProjects();
   render();
 }
 
@@ -497,6 +552,10 @@ recordsContainer.addEventListener('blur', async (ev) => {
 
 searchInput.addEventListener('input', render);
 sortSelect.addEventListener('change', render);
+projectSelect.addEventListener('change', () => {
+  _selectedProject = projectSelect.value;
+  render();
+});
 
 load();
 // Refresh in case the user records something in another tab.

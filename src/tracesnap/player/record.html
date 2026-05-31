@@ -223,6 +223,14 @@ button:disabled{ opacity:.5; cursor:wait }
       </div>
     </div>
 
+    <div class="row">
+      <label for="script-args">Arguments</label>
+      <div class="field">
+        <input id="script-args" type="text" placeholder="passed to the script as sys.argv, e.g. --verbose input.csv">
+        <div class="hint">Runs it like <code>python script.py …</code>. Space-separated; quote values with spaces.</div>
+      </div>
+    </div>
+
     <div class="actions">
       <button class="primary" id="script-record" disabled>Start recording</button>
       <span class="status" id="script-status">Pick a file to begin.</span>
@@ -406,7 +414,7 @@ function setTermStatus(state, msg){
   termKillBtn.disabled = (state === 'exit' || state === 'killed');
 }
 
-function startJob({path, name, redact}){
+function startJob({path, name, redact, args}){
   // Reset terminal
   termOut.innerHTML = '';
   scriptResultEl.innerHTML = '';
@@ -417,7 +425,7 @@ function startJob({path, name, redact}){
 
   fetch('/api/run/script/start', {
     method: 'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({path, name, redact})
+    body: JSON.stringify({path, name, redact, args})
   }).then(r => r.json()).then(d => {
     if(!d.job_id){
       setTermStatus('killed', 'failed to start');
@@ -486,7 +494,8 @@ recordBtn.addEventListener('click', () => {
   scriptStatusEl.className = 'status';
   const name = document.getElementById('script-name').value.trim();
   const redact = document.getElementById('script-redact').value.trim();
-  startJob({path: _selectedFile, name, redact});
+  const args = document.getElementById('script-args').value.trim();
+  startJob({path: _selectedFile, name, redact, args});
 });
 
 // Send stdin on Enter

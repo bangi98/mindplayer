@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, library
+from . import __version__, _project, library
 from ._recorder import start_recording, stop_recording
 from .api import write_trace
 from .server import DEFAULT_PORT, serve
@@ -110,17 +110,25 @@ def cmd_record(args):
         structure_path = out_path.with_suffix(".structure.json") if args.structure_out is None \
                          else Path(args.structure_out).resolve()
 
+    project = (args.project or "").strip() or _project.current_project(str(target))
+
     discovered = _discover_local_sources(target)
     source_files = [str(p) for p in discovered]
     start_recording(trace_id=args.id, kind=args.kind,
                     source_files=source_files, redact_names=redact)
     code = compile(src, str(target), "exec")
     exec_error = None
+    # Run the script the way `python script.py ...` would: as __main__, with
+    # its own sys.argv. This lets recorded scripts read command-line arguments
+    # (and runs their `if __name__ == "__main__":` block).
+    saved_argv = sys.argv
+    sys.argv = [str(target), *args.script_args]
     try:
-        exec(code, {"__name__": "__traced__", "__file__": str(target)})
+        exec(code, {"__name__": "__main__", "__file__": str(target)})
     except BaseException as e:                 # noqa: BLE001
         exec_error = e
     finally:
+        sys.argv = saved_argv
         trace = stop_recording()
 
     if out_path:
@@ -140,7 +148,8 @@ def cmd_record(args):
             structure_obj = {"version": "0.1", "source_path": str(target),
                              "nodes": primary_structure}
         meta = library.add(trace, name=args.name or args.id,
-                           source=str(target), structure_json=structure_obj)
+                           source=str(target), structure_json=structure_obj,
+                           project=project)
 
     events = trace["events"]
     counts = {}
@@ -155,6 +164,8 @@ def cmd_record(args):
     else:
         print(f"tracesnap: recorded {len(events)} events", file=out_stream)
     print(f"tracesnap: event types: {counts}", file=out_stream)
+    if args.script_args:
+        print(f"tracesnap: script argv {args.script_args}", file=out_stream)
     if len(source_files) > 1:
         print(f"tracesnap: traced {len(source_files)} files "
               f"(entrypoint + {len(source_files) - 1} sibling)", file=out_stream)
@@ -163,6 +174,7 @@ def cmd_record(args):
     if meta:
         print(f"tracesnap: library id  {meta['id']}", file=out_stream)
         print(f"tracesnap: library name {meta['name']!r}", file=out_stream)
+        print(f"tracesnap: project      {meta.get('project') or '(none)'}", file=out_stream)
         print(f"tracesnap: open it with:  tracesnap view {meta['id']}", file=out_stream)
     return 1 if exec_error else 0
 
@@ -188,20 +200,49 @@ def cmd_view(args):
 # ---------------------------------------------------------------------------
 # list / rename / delete
 # ---------------------------------------------------------------------------
-def cmd_list(_args):
-    records = library.list_traces()
+def cmd_list(args):
+    project = getattr(args, "project", None)
+    records = library.list_traces(project=project)
     if not records:
         root = library.library_root()
-        print(f"(no saved records yet in {root})")
+        scope = f" for project {project!r}" if project else ""
+        print(f"(no saved records yet{scope} in {root})")
         print("Run `tracesnap record <file.py>` to create one.")
         return 0
     # Compact aligned table
     w_id = max(len(r["id"]) for r in records)
     w_name = max(len(r["name"]) for r in records)
-    print(f"{'ID'.ljust(w_id)}  {'NAME'.ljust(w_name)}  CREATED               EVENTS  KIND")
+    w_proj = max([len(r.get("project") or "-") for r in records] + [len("PROJECT")])
+    print(f"{'ID'.ljust(w_id)}  {'NAME'.ljust(w_name)}  {'PROJECT'.ljust(w_proj)}  "
+          f"CREATED               EVENTS  KIND")
     for r in records:
-        print(f"{r['id'].ljust(w_id)}  {r['name'].ljust(w_name)}  "
+        proj = (r.get("project") or "-").ljust(w_proj)
+        print(f"{r['id'].ljust(w_id)}  {r['name'].ljust(w_name)}  {proj}  "
               f"{r['created']:<20}  {r['event_count']:>6}  {r['kind']}")
+    return 0
+
+
+def cmd_init(args):
+    cfg, name = _project.init_project(name=args.name)
+    print(f"tracesnap: project {name!r}")
+    print(f"tracesnap: wrote {cfg}")
+    print("New records made from this directory will be tagged with this project.")
+    return 0
+
+
+def cmd_project(args):
+    if args.name:
+        cfg, name = _project.set_project(args.name)
+        print(f"tracesnap: project set to {name!r}")
+        print(f"tracesnap: wrote {cfg}")
+        return 0
+    name = _project.current_project()
+    cfg = _project.find_config()
+    if cfg is not None:
+        print(f"{name}  ({cfg})")
+    else:
+        print(f"{name}  (defaulted to folder name — no {_project.CONFIG_NAME} found)")
+        print("Run `tracesnap init` to make it explicit.")
     return 0
 
 
@@ -259,6 +300,13 @@ def build_parser():
                    help="session.kind value (default: 'script').")
     r.add_argument("--redact", default=None,
                    help="Comma-separated extra variable names to redact.")
+    r.add_argument("--project", default=None,
+                   help="Project to file this record under (default: from "
+                        ".tracesnap.toml, else the current folder name).")
+    r.add_argument("script_args", nargs="*", metavar="ARG",
+                   help="Arguments passed to the script as sys.argv[1:]. Put "
+                        "them after a literal `--`, e.g. "
+                        "`tracesnap record app.py -- --verbose input.csv`.")
     r.set_defaults(func=cmd_record)
 
     v = sub.add_parser("view", help="Open a trace in the player. Without args, browse the library.")
@@ -280,7 +328,21 @@ def build_parser():
     v.set_defaults(func=cmd_view)
 
     ls = sub.add_parser("list", help="List saved records in the library.")
+    ls.add_argument("--project", default=None,
+                    help="Only list records filed under this project.")
     ls.set_defaults(func=cmd_list)
+
+    ini = sub.add_parser("init",
+        help="Create a .tracesnap.toml in this directory to name the project.")
+    ini.add_argument("--name", default=None,
+                     help="Project name (default: this folder's name).")
+    ini.set_defaults(func=cmd_init)
+
+    pj = sub.add_parser("project",
+        help="Show the current project, or set it with a name argument.")
+    pj.add_argument("name", nargs="?", default=None,
+                    help="New project name. Omit to print the current one.")
+    pj.set_defaults(func=cmd_project)
 
     rn = sub.add_parser("rename", help="Rename a saved record.")
     rn.add_argument("id", help="Library id (from `tracesnap list`).")
@@ -296,8 +358,18 @@ def build_parser():
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    # Everything after a literal `--` is handed to the recorded script as its
+    # own sys.argv, never parsed as a tracesnap option. (argparse's native `--`
+    # handling is unreliable with subparsers, so we split it off ourselves.)
+    passthrough = []
+    if "--" in argv:
+        idx = argv.index("--")
+        argv, passthrough = argv[:idx], argv[idx + 1:]
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.script_args = passthrough + list(getattr(args, "script_args", None) or [])
     if args.version:
         return cmd_version(args)
     if not getattr(args, "cmd", None):

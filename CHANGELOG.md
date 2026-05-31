@@ -2,6 +2,35 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+## [0.2.1] - 2026-06-01
+
+### Added
+- **Project-scoped library.** Every record is now stamped with a `project`
+  name so traces from different projects no longer mix together. The name comes
+  from a `.tracesnap.toml` (`project = "..."`) at the project root, falling back
+  to the folder name. New commands: `tracesnap init` (write the config,
+  defaulting to the folder name) and `tracesnap project [name]` (show or set it).
+  `tracesnap record` takes `--project`, and `tracesnap list` takes `--project`
+  plus shows a PROJECT column.
+- The player home page gained a **project dropdown** that defaults to the
+  current project (the directory `tracesnap view` ran in) with an
+  "All projects" option. New API: `GET /api/projects` and a `?project=` filter
+  on `GET /api/traces`.
+- **Command-line arguments for recorded scripts.** `tracesnap record app.py --
+  --verbose input.csv` passes everything after `--` to the script as its
+  `sys.argv`. The "New record" page gained an **Arguments** field for the same.
+
+### Changed
+- Recorded scripts now run as `__main__` (previously `__traced__`), so a
+  script's `if __name__ == "__main__":` block executes — `tracesnap record
+  script.py` now behaves like `python script.py`.
+
+### Fixed
+- `tracesnap.__version__` was stuck at `0.1.0`; it now tracks the released
+  version.
+
 ## [0.2.0] — decorator-based framework integrations
 
 ### Changed (breaking)

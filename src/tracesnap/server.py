@@ -5,7 +5,9 @@ Serves the bundled player HTMLs + a small JSON API over the on-disk library
 plus subprocess-driven recording. Zero external deps (stdlib only).
 
 Routes:
-- `GET    /api/traces`              -> list of library metadata (newest first)
+- `GET    /api/traces`              -> list of library metadata (newest first;
+                                       `?project=<name>` filters to one project)
+- `GET    /api/projects`            -> `{current, projects:[{name,count}], total}`
 - `GET    /api/traces/<id>`         -> the trace JSON
 - `PATCH  /api/traces/<id>`         -> `{name: "..."}` rename
 - `DELETE /api/traces/<id>`         -> remove from library
@@ -21,6 +23,7 @@ import json
 import os
 import queue
 import secrets
+import shlex
 import shutil
 import socketserver
 import subprocess
@@ -29,6 +32,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -40,7 +44,7 @@ try:
 except ImportError:                               # pragma: no cover
     from importlib_resources import files as _resource_files
 
-from . import library
+from . import _project, library
 
 
 _PLAYER_HTMLS = ("home.html", "player.html", "simulator.html", "call_graph.html",
@@ -102,6 +106,7 @@ def serve(trace_path=None, target_id=None, view=None,
     if scan_root is None:
         scan_root = os.getcwd()
     scan_root = str(Path(scan_root).resolve())
+    current_project = _project.current_project(scan_root)
 
     query = ""
     if target_id:
@@ -113,7 +118,8 @@ def serve(trace_path=None, target_id=None, view=None,
         shutil.copy(trace_path, tmpdir / trace_path.name)
         query = f"?trace={trace_path.name}"
 
-    handler = _make_handler(str(tmpdir), scan_root=scan_root)
+    handler = _make_handler(str(tmpdir), scan_root=scan_root,
+                            current_project=current_project)
     try:
         httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), handler)
     except OSError as e:
@@ -129,6 +135,7 @@ def serve(trace_path=None, target_id=None, view=None,
         print("tracesnap: serving the player library", file=sys.stderr)
         print(f"tracesnap: open {url}", file=sys.stderr)
         print(f"tracesnap: library at {library.library_root()}", file=sys.stderr)
+        print(f"tracesnap: project {current_project!r} (new records land here)", file=sys.stderr)
         print(f"tracesnap: script scan root {scan_root}", file=sys.stderr)
         print("tracesnap: press Ctrl-C to stop", file=sys.stderr)
 
@@ -177,8 +184,27 @@ def _discover_sources(root, *, limit=200):
     return out
 
 
+def _coerce_args(raw):
+    """Turn a request's ``args`` field into a list of argv strings. Accepts a
+    list (used verbatim) or a string (split with shell-like quoting)."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return []
+        try:
+            return shlex.split(raw)
+        except ValueError:
+            return raw.split()
+    return []
+
+
 def _run_record_subprocess(script_path, *, name=None, redact=None,
-                           stdin=None, timeout=60, id_label="recorded"):
+                           stdin=None, timeout=60, id_label="recorded",
+                           script_args=None):
     """Run `tracesnap.cli record` as a subprocess.
 
     Returns (returncode, combined_log, timed_out).
@@ -186,6 +212,8 @@ def _run_record_subprocess(script_path, *, name=None, redact=None,
     - `stdin`: string piped to the subprocess's stdin (one input() answer per
       line). Empty string by default so input() raises EOFError quickly
       instead of hanging forever.
+    - `script_args`: list of arguments passed to the recorded script as its
+      own argv (after a `--` separator).
     - `timeout`: seconds. On timeout the process is killed and we report a
       helpful error in the log.
     """
@@ -195,6 +223,8 @@ def _run_record_subprocess(script_path, *, name=None, redact=None,
         cmd += ["--name", name]
     if redact:
         cmd += ["--redact", redact]
+    if script_args:
+        cmd += ["--", *script_args]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               input=stdin or "", timeout=timeout)
@@ -225,12 +255,14 @@ class _Job:
     streamed to one SSE consumer. Each event goes on `events_q` as
     `(event_type, data_dict)`.
     """
-    def __init__(self, path, *, name=None, redact=None, id_label="recorded"):
+    def __init__(self, path, *, name=None, redact=None, id_label="recorded",
+                 script_args=None):
         self.id = secrets.token_hex(6)
         self.path = path
         self.name = name
         self.redact = redact
         self.id_label = id_label
+        self.script_args = script_args or []
         self.proc = None
         self.events_q = queue.Queue()
         self.alive = False
@@ -249,6 +281,8 @@ class _Job:
             cmd += ["--name", self.name]
         if self.redact:
             cmd += ["--redact", self.redact]
+        if self.script_args:
+            cmd += ["--", *self.script_args]
         self._before_ids = {m["id"] for m in library.list_traces()}
         # Binary mode + bufsize=0 means stdout/stderr/stdin are unbuffered
         # FileIO objects -- read() returns the moment data is available,
@@ -365,7 +399,7 @@ def _proxy_http(method, url, headers=None, body=None, timeout=30):
 # ---------------------------------------------------------------------------
 # HTTP handler with /api/traces routes overlaid on static file serving
 # ---------------------------------------------------------------------------
-def _make_handler(directory, *, scan_root=None):
+def _make_handler(directory, *, scan_root=None, current_project=None):
     class Handler(http.server.SimpleHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -427,6 +461,8 @@ def _make_handler(directory, *, scan_root=None):
                 return None
             if path == "/api/sources":
                 return {"kind": "sources"}
+            if path == "/api/projects":
+                return {"kind": "projects"}
             if path == "/api/run/script":
                 return {"kind": "run_script"}
             if path == "/api/run/request":
@@ -504,7 +540,19 @@ def _make_handler(directory, *, scan_root=None):
         def _handle_api(self, api, method):
             kind = api["kind"]
             if kind == "traces_collection" and method == "GET":
-                self._send_json(library.list_traces())
+                qs = urllib.parse.urlsplit(self.path).query
+                project = (urllib.parse.parse_qs(qs).get("project") or [None])[0]
+                self._send_json(library.list_traces(project=project))
+                return
+            if kind == "projects" and method == "GET":
+                counts = library.list_projects()
+                projects = [{"name": n, "count": c}
+                            for n, c in sorted(counts.items())]
+                self._send_json({
+                    "current": current_project or "",
+                    "projects": projects,
+                    "total": sum(counts.values()),
+                })
                 return
             if kind == "traces_item" and method == "GET":
                 meta, trace = library.get(api["id"])
@@ -550,6 +598,7 @@ def _make_handler(directory, *, scan_root=None):
                     stdin=body.get("stdin") or "",
                     timeout=timeout,
                     id_label=(body.get("id") or "").strip() or "recorded",
+                    script_args=_coerce_args(body.get("args")),
                 )
                 after = library.list_traces()
                 added = [m for m in after if m["id"] not in before]
@@ -570,7 +619,8 @@ def _make_handler(directory, *, scan_root=None):
                 job = _Job(path,
                            name=(body.get("name") or "").strip() or None,
                            redact=(body.get("redact") or "").strip() or None,
-                           id_label=(body.get("id") or "").strip() or "recorded")
+                           id_label=(body.get("id") or "").strip() or "recorded",
+                           script_args=_coerce_args(body.get("args")))
                 _jobs[job.id] = job
                 job.start()
                 self._send_json({"job_id": job.id})

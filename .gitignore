@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+.tracesnap.toml
 # Local AI assistant context (not for distribution)
 claude.md
 CLAUDE.md

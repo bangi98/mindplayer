@@ -6,6 +6,10 @@ serves the whole library so the player can browse/rename/delete them.
 
 Layout (default at ~/.tracesnap/, overridable via $TRACESNAP_HOME):
 
+The store is shared across all projects; each record carries a ``project``
+name (see :mod:`tracesnap._project`) so the player can show one project at a
+time and switch between them.
+
     <library_root>/
     ├── index.json                            # ordered list of metadata records
     └── traces/
@@ -23,6 +27,8 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+
+from . import _project
 
 
 _INDEX_VERSION = 1
@@ -81,10 +87,28 @@ def _structure_path(id_):
     return library_root() / "traces" / f"{id_}.structure.json"
 
 
-def list_traces():
-    """Return the list of metadata records (newest first)."""
+def list_traces(project=None):
+    """Return the list of metadata records (newest first).
+
+    If ``project`` is given, only records stamped with that project name are
+    returned (legacy records with no project are excluded). Pass ``None`` (the
+    default) to get every record.
+    """
     idx = _read_index()
-    return list(reversed(idx.get("traces", [])))
+    traces = list(reversed(idx.get("traces", [])))
+    if project:
+        traces = [m for m in traces if (m.get("project") or "") == project]
+    return traces
+
+
+def list_projects():
+    """Return ``{project_name: record_count}`` across the whole library.
+    Legacy records with no project land in the ``""`` (unknown) bucket."""
+    counts = {}
+    for m in _read_index().get("traces", []):
+        name = m.get("project") or ""
+        counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def get(id_):
@@ -106,8 +130,15 @@ def get_path(id_):
     return p if p.exists() else None
 
 
-def add(trace, *, name=None, source=None, structure_json=None):
-    """Persist a trace dict in the library. Returns the new metadata dict."""
+def add(trace, *, name=None, source=None, structure_json=None, project=None):
+    """Persist a trace dict in the library. Returns the new metadata dict.
+
+    ``project`` stamps the record so the player can filter by project. When
+    omitted, it is resolved from the current working directory (the nearest
+    ``.tracesnap.toml`` or the folder name) — see :mod:`tracesnap._project`.
+    """
+    if project is None:
+        project = _project.current_project()
     id_ = _new_id()
     p = _trace_path(id_)
     with p.open("w", encoding="utf-8") as f:
@@ -126,6 +157,7 @@ def add(trace, *, name=None, source=None, structure_json=None):
         "event_count": len(trace.get("events", [])),
         "source": source or session.get("entry") or "",
         "kind": session.get("kind", "script"),
+        "project": project or "",
     }
     idx = _read_index()
     idx.setdefault("traces", []).append(meta)
