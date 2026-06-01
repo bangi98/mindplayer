@@ -138,10 +138,11 @@ def test_streaming_interactive_input(server, tmp_library):
     meta, trace = library.get(exit_data["new_id"])
     reprs = {e["var"]: e["value"]["repr"]
              for e in trace["events"] if e["type"] == "assign"}
-    # `who` is set inside main() and IS recorded; module-level `out = main()`
-    # is intentionally skipped (recorder filters out <module> frames). Confirm
-    # the script saw the input we sent by inspecting main's return value.
+    # `who` is set inside main() and IS recorded. For kind="script" the
+    # <module> frame is the program itself, so the top-level `out = main()`
+    # assignment is now recorded too (web/wsgi kinds keep module frames silent).
     assert reprs.get("who") == "'Alice'"
+    assert reprs.get("out") == "'ALICE'"
     ret_events = [e for e in trace["events"] if e["type"] == "return" and e.get("func") == "main"]
     assert ret_events and ret_events[0]["value"]["repr"] == "'ALICE'"
 

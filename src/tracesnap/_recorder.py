@@ -22,12 +22,31 @@ def _changed(a, b):
         return a is not b
 
 
+def _is_dunder(name):
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _call_args(sess, co_name, frame):
+    """Build the args map for a `call` event. For the <module> frame the
+    locals are the module globals (__builtins__, __name__, __file__, ...), so
+    we drop dunders to keep the root call node free of import machinery."""
+    items = frame.f_locals.items()
+    if co_name == "<module>":
+        return {k: sess.cap(k, v) for k, v in items if not _is_dunder(k)}
+    return {k: sess.cap(k, v) for k, v in items}
+
+
 def _diff(sess, frame, attribute_line):
     fid = id(frame)
     fname = frame.f_code.co_filename
     prev = sess.prev_locals.get(fid, {})
     cur = frame.f_locals
     for name, val in cur.items():
+        # Skip dunder globals (e.g. __annotations__, which CPython creates
+        # lazily on the first annotated module-level assignment) so module
+        # frames don't emit import-machinery noise.
+        if _is_dunder(name):
+            continue
         parent = sess.resolve_parent(fid, fname, attribute_line)
         if name not in prev:
             sess.change_counts[name] = 0
@@ -118,10 +137,12 @@ def _local_trace(frame, event, arg):
 
 
 def _module_local_trace(frame, event, arg):
-    # Minimal trace for <module> frames: capture only exception events so
-    # top-level raises appear in the trace. Line/call/assign/return are kept
-    # silent to preserve the contract that module-level statements stay out of
-    # the trace (see tests/test_streaming.py).
+    # Minimal trace for <module> frames used by NON-script kinds (web/wsgi/
+    # streaming), where the module body is import-time setup. Capture only
+    # exception events so top-level raises still appear; keep line/call/assign/
+    # return silent so import-time statements stay out of the trace
+    # (see tests/test_streaming.py). For kind="script" the module frame is the
+    # program itself and is traced fully via _global_trace -> _local_trace.
     if event == "exception":
         sess = current()
         if sess is None:
@@ -158,7 +179,10 @@ def _global_trace(frame, event, arg):
     if fname not in sess.source_files_set:
         return None
     co_name = frame.f_code.co_name
-    if co_name == "<module>":
+    if co_name == "<module>" and sess.kind != "script":
+        # For non-script kinds (web/wsgi/streaming) the <module> frame is
+        # import-time setup that runs once and would pollute every trace.
+        # Keep it silent except for exceptions (see _module_local_trace).
         return _module_local_trace if event == "call" else None
     if co_name.startswith("_recorder_"):
         return None                            # convention: skip framework glue
@@ -175,7 +199,7 @@ def _global_trace(frame, event, arg):
             if cfile in sess.source_files_set:
                 parent = sess.resolve_parent(id(caller), cfile, caller.f_lineno)
         sess.emit(type="call", func=co_name, line=frame.f_lineno, file=fname,
-                  args={k: sess.cap(k, v) for k, v in frame.f_locals.items()},
+                  args=_call_args(sess, co_name, frame),
                   parent_seq=parent)
         return _local_trace
     return None
