@@ -4,7 +4,12 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [0.2.2] - 2026-06-01
+## [0.2.2] - 2026-06-02
+
+### Added
+- `examples/sample_analysis.py` — a flat, function-free example (top-level
+  loops/branches that analyze a list and write a report file), useful for
+  exercising the simulator's module-frame rendering.
 
 ### Fixed
 - **Top-level exceptions are now captured.** Exceptions raised in a recorded
@@ -14,6 +19,11 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/).
   installs a minimal exception-only trace on `<module>` frames, capturing
   top-level raises while still keeping module-level line/assign/return
   statements out of the trace.
+- **Simulator now renders the body of `<module>` (top-level) frames.** The
+  frame box looked up structure children by function name, but the top-level
+  frame has no function node, so a function-free script showed an empty
+  `<module>()` box. The simulator now falls back to the root-level nodes,
+  so top-level statements, loops, and branches light up like any function body.
 
 ## [0.2.1] - 2026-06-01
 

@@ -662,10 +662,14 @@ function layoutFrame(frame, isInnermost, changedHereName){
   const funcs = funcByFile[frame.file] || {};
   const kidsByParent = childrenByParentByFile[frame.file] || {};
   const fn = funcs[frame.func];
-  const children = fn ? (kidsByParent[fn.id] || [])
-                          .filter(c => c.kind !== 'function')
-                          .sort((a,b)=>a.lineno-b.lineno)
-                       : [];
+  // Top-level (module) frames have no function node; their statements/loops/
+  // branches are parented at the root, stored under the '__root__' key.
+  const childParentId = fn ? fn.id : (frame.func === '<module>' ? '__root__' : null);
+  const children = childParentId != null
+                     ? (kidsByParent[childParentId] || [])
+                         .filter(c => c.kind !== 'function')
+                         .sort((a,b)=>a.lineno-b.lineno)
+                     : [];
   const flowW = FRAME_W - 2*FRAME_PAD;
   const layouts = children.map(c => ({node:c, lay: layoutNode(c, frame, flowW)}));
   const flowH = layouts.reduce((sum, l, idx) =>
