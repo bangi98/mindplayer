@@ -23,7 +23,7 @@ from ._recorder import start_recording, stop_recording
 from .api import Recording, record, write_trace, load_trace
 from . import redaction
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     "record",

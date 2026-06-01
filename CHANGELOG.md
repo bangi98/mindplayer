@@ -4,6 +4,17 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-01
+
+### Fixed
+- **Top-level exceptions are now captured.** Exceptions raised in a recorded
+  script's `<module>` frame (e.g. a crash at module top level) were never
+  recorded as `exception` events, so the simulator showed "0 exceptions" and
+  the trace's event-type counts had no `exception` key. The recorder now
+  installs a minimal exception-only trace on `<module>` frames, capturing
+  top-level raises while still keeping module-level line/assign/return
+  statements out of the trace.
+
 ## [0.2.1] - 2026-06-01
 
 ### Added

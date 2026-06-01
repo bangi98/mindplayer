@@ -117,6 +117,39 @@ def _local_trace(frame, event, arg):
     return _local_trace
 
 
+def _module_local_trace(frame, event, arg):
+    # Minimal trace for <module> frames: capture only exception events so
+    # top-level raises appear in the trace. Line/call/assign/return are kept
+    # silent to preserve the contract that module-level statements stay out of
+    # the trace (see tests/test_streaming.py).
+    if event == "exception":
+        sess = current()
+        if sess is None:
+            return _module_local_trace
+        if arg is not None:
+            exc_type, exc_value, _tb = arg
+            fid = id(frame)
+            fname = frame.f_code.co_filename
+            line = frame.f_lineno
+            parent = sess.resolve_parent(fid, fname, line)
+            type_name = getattr(exc_type, "__name__", str(exc_type))
+            try:
+                msg = str(exc_value)
+            except Exception:                                # noqa: BLE001
+                msg = repr(exc_value)
+            sess.emit(
+                type="exception",
+                exc_type=type_name,
+                message=msg[:200],
+                value=sess.cap(None, exc_value),
+                line=line,
+                file=fname,
+                func=frame.f_code.co_name,
+                parent_seq=parent,
+            )
+    return _module_local_trace
+
+
 def _global_trace(frame, event, arg):
     sess = current()
     if sess is None:
@@ -126,7 +159,7 @@ def _global_trace(frame, event, arg):
         return None
     co_name = frame.f_code.co_name
     if co_name == "<module>":
-        return None
+        return _module_local_trace if event == "call" else None
     if co_name.startswith("_recorder_"):
         return None                            # convention: skip framework glue
     if event == "call":
